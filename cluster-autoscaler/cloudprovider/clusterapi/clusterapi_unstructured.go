@@ -53,23 +53,23 @@ type unstructuredScalableResource struct {
 	autoscalingOptions map[string]string
 }
 
-func (r unstructuredScalableResource) ID() string {
+func (r *unstructuredScalableResource) ID() string {
 	return path.Join(r.Kind(), r.Namespace(), r.Name())
 }
 
-func (r unstructuredScalableResource) MaxSize() int {
+func (r *unstructuredScalableResource) MaxSize() int {
 	return r.maxSize
 }
 
-func (r unstructuredScalableResource) MinSize() int {
+func (r *unstructuredScalableResource) MinSize() int {
 	return r.minSize
 }
 
-func (r unstructuredScalableResource) Kind() string {
+func (r *unstructuredScalableResource) Kind() string {
 	return r.unstructured.GetKind()
 }
 
-func (r unstructuredScalableResource) GroupVersionResource() (schema.GroupVersionResource, error) {
+func (r *unstructuredScalableResource) GroupVersionResource() (schema.GroupVersionResource, error) {
 	switch r.Kind() {
 	case machineDeploymentKind:
 		return r.controller.machineDeploymentResource, nil
@@ -82,15 +82,15 @@ func (r unstructuredScalableResource) GroupVersionResource() (schema.GroupVersio
 	}
 }
 
-func (r unstructuredScalableResource) Name() string {
+func (r *unstructuredScalableResource) Name() string {
 	return r.unstructured.GetName()
 }
 
-func (r unstructuredScalableResource) Namespace() string {
+func (r *unstructuredScalableResource) Namespace() string {
 	return r.unstructured.GetNamespace()
 }
 
-func (r unstructuredScalableResource) ProviderIDs() ([]string, error) {
+func (r *unstructuredScalableResource) ProviderIDs() ([]string, error) {
 	providerIds, err := r.controller.scalableResourceProviderIDs(r.unstructured)
 	if err != nil {
 		return nil, err
@@ -99,7 +99,7 @@ func (r unstructuredScalableResource) ProviderIDs() ([]string, error) {
 	return providerIds, nil
 }
 
-func (r unstructuredScalableResource) Replicas() (int, error) {
+func (r *unstructuredScalableResource) Replicas() (int, error) {
 	gvr, err := r.GroupVersionResource()
 	if err != nil {
 		return 0, err
@@ -116,7 +116,7 @@ func (r unstructuredScalableResource) Replicas() (int, error) {
 	return int(s.Spec.Replicas), nil
 }
 
-func (r unstructuredScalableResource) SetSize(nreplicas int) error {
+func (r *unstructuredScalableResource) SetSize(nreplicas int) error {
 	switch {
 	case nreplicas > r.maxSize:
 		return fmt.Errorf("size increase too large - desired:%d max:%d", nreplicas, r.maxSize)
@@ -167,7 +167,7 @@ type autoscalingv1ScaleSpec struct {
 	Replicas *int32 `json:"replicas,omitempty" protobuf:"varint,1,opt,name=replicas"`
 }
 
-func (r unstructuredScalableResource) UnmarkMachineForDeletion(machine *unstructured.Unstructured) error {
+func (r *unstructuredScalableResource) UnmarkMachineForDeletion(machine *unstructured.Unstructured) error {
 	u, err := r.controller.managementClient.Resource(r.controller.machineResource).Namespace(machine.GetNamespace()).Get(context.TODO(), machine.GetName(), metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -182,7 +182,7 @@ func (r unstructuredScalableResource) UnmarkMachineForDeletion(machine *unstruct
 	return updateErr
 }
 
-func (r unstructuredScalableResource) MarkMachineForDeletion(machine *unstructured.Unstructured) error {
+func (r *unstructuredScalableResource) MarkMachineForDeletion(machine *unstructured.Unstructured) error {
 	u, err := r.controller.managementClient.Resource(r.controller.machineResource).Namespace(machine.GetNamespace()).Get(context.TODO(), machine.GetName(), metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -204,7 +204,7 @@ func (r unstructuredScalableResource) MarkMachineForDeletion(machine *unstructur
 	return updateErr
 }
 
-func (r unstructuredScalableResource) Labels() map[string]string {
+func (r *unstructuredScalableResource) Labels() map[string]string {
 	allLabels := map[string]string{}
 
 	// get the managed labels from the scalable resource, if they exist.
@@ -231,7 +231,7 @@ func (r unstructuredScalableResource) Labels() map[string]string {
 	return allLabels
 }
 
-func (r unstructuredScalableResource) Taints() []apiv1.Taint {
+func (r *unstructuredScalableResource) Taints() []apiv1.Taint {
 	taints := make([]apiv1.Taint, 0)
 
 	newtaints, found, err := unstructured.NestedSlice(r.unstructured.Object, "spec", "template", "spec", "taints")
@@ -282,7 +282,7 @@ func unstructuredToTaint(unstructuredTaintInterface interface{}) *corev1.Taint {
 
 // A node group can scale from zero if it can inform about the CPU and memory
 // capacity of the nodes within the group.
-func (r unstructuredScalableResource) CanScaleFromZero() bool {
+func (r *unstructuredScalableResource) CanScaleFromZero() bool {
 	capacity, err := r.InstanceCapacity()
 	if err != nil {
 		return false
@@ -299,7 +299,7 @@ func (r unstructuredScalableResource) CanScaleFromZero() bool {
 // capacity for this node group. The returned map will be empty if the
 // provider does not support scaling from zero, or the annotations have not
 // been added.
-func (r unstructuredScalableResource) InstanceCapacity() (map[corev1.ResourceName]resource.Quantity, error) {
+func (r *unstructuredScalableResource) InstanceCapacity() (map[corev1.ResourceName]resource.Quantity, error) {
 	capacityAnnotations := map[corev1.ResourceName]resource.Quantity{}
 
 	cpu, err := r.InstanceCPUCapacityAnnotation()
@@ -373,7 +373,7 @@ func (r unstructuredScalableResource) InstanceCapacity() (map[corev1.ResourceNam
 
 // InstanceSystemInfo sets the nodeSystemInfo from the infrastructure reference resource.
 // If the infrastructure reference resource is not found, returns nil.
-func (r unstructuredScalableResource) InstanceSystemInfo() *apiv1.NodeSystemInfo {
+func (r *unstructuredScalableResource) InstanceSystemInfo() *apiv1.NodeSystemInfo {
 	infraObj, err := r.readInfrastructureReferenceResource()
 	if err != nil || infraObj == nil {
 		return nil
@@ -382,7 +382,7 @@ func (r unstructuredScalableResource) InstanceSystemInfo() *apiv1.NodeSystemInfo
 	return &nsiObj
 }
 
-func (r unstructuredScalableResource) InstanceResourceSlices(nodeName string) ([]*resourceapi.ResourceSlice, error) {
+func (r *unstructuredScalableResource) InstanceResourceSlices(nodeName string) ([]*resourceapi.ResourceSlice, error) {
 	var result []*resourceapi.ResourceSlice
 	driver := r.InstanceDRADriver()
 	if driver == "" {
@@ -422,31 +422,31 @@ func (r unstructuredScalableResource) InstanceResourceSlices(nodeName string) ([
 	return nil, nil
 }
 
-func (r unstructuredScalableResource) InstanceEphemeralDiskCapacityAnnotation() (resource.Quantity, error) {
+func (r *unstructuredScalableResource) InstanceEphemeralDiskCapacityAnnotation() (resource.Quantity, error) {
 	return parseEphemeralDiskCapacity(r.unstructured.GetAnnotations())
 }
 
-func (r unstructuredScalableResource) InstanceCPUCapacityAnnotation() (resource.Quantity, error) {
+func (r *unstructuredScalableResource) InstanceCPUCapacityAnnotation() (resource.Quantity, error) {
 	return parseCPUCapacity(r.unstructured.GetAnnotations())
 }
 
-func (r unstructuredScalableResource) InstanceMemoryCapacityAnnotation() (resource.Quantity, error) {
+func (r *unstructuredScalableResource) InstanceMemoryCapacityAnnotation() (resource.Quantity, error) {
 	return parseMemoryCapacity(r.unstructured.GetAnnotations())
 }
 
-func (r unstructuredScalableResource) InstanceGPUCapacityAnnotation() (resource.Quantity, error) {
+func (r *unstructuredScalableResource) InstanceGPUCapacityAnnotation() (resource.Quantity, error) {
 	return parseGPUCount(r.unstructured.GetAnnotations())
 }
 
-func (r unstructuredScalableResource) InstanceGPUTypeAnnotation() string {
+func (r *unstructuredScalableResource) InstanceGPUTypeAnnotation() string {
 	return parseGPUType(r.unstructured.GetAnnotations())
 }
 
-func (r unstructuredScalableResource) InstanceMaxPodsCapacityAnnotation() (resource.Quantity, error) {
+func (r *unstructuredScalableResource) InstanceMaxPodsCapacityAnnotation() (resource.Quantity, error) {
 	return parseMaxPodsCapacity(r.unstructured.GetAnnotations())
 }
 
-func (r unstructuredScalableResource) InstanceDRADriver() string {
+func (r *unstructuredScalableResource) InstanceDRADriver() string {
 	return parseDRADriver(r.unstructured.GetAnnotations())
 }
 
@@ -454,7 +454,7 @@ func (r unstructuredScalableResource) InstanceDRADriver() string {
 // a CSINode object with the list of installed drivers and their volume limits.
 // The annotation format is "driver-name=volume-limit,driver-name2=volume-limit2".
 // Returns nil if the annotation is not present or empty.
-func (r unstructuredScalableResource) InstanceCSINode() *storagev1.CSINode {
+func (r *unstructuredScalableResource) InstanceCSINode() *storagev1.CSINode {
 	annotations := r.unstructured.GetAnnotations()
 	// annotation value of the form "driver1=limit1,driver2=limit2"
 	if val, found := annotations[csiDriverKey]; found && val != "" {
@@ -471,7 +471,7 @@ func (r unstructuredScalableResource) InstanceCSINode() *storagev1.CSINode {
 	return nil
 }
 
-func (r unstructuredScalableResource) readInfrastructureReferenceResource() (*unstructured.Unstructured, error) {
+func (r *unstructuredScalableResource) readInfrastructureReferenceResource() (*unstructured.Unstructured, error) {
 	// Cache w/ lazy loading of the infrastructure reference resource.
 	r.infraMutex.RLock()
 	if r.infraObj != nil {
