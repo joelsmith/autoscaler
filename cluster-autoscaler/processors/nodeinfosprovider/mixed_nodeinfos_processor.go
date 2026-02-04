@@ -24,7 +24,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
-	"k8s.io/autoscaler/cluster-autoscaler/context"
+	ca_context "k8s.io/autoscaler/cluster-autoscaler/context"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	caerror "k8s.io/autoscaler/cluster-autoscaler/utils/errors"
@@ -63,8 +63,8 @@ func NewMixedTemplateNodeInfoProvider(t *time.Duration, forceDaemonSets bool) *M
 	}
 }
 
-func (p *MixedTemplateNodeInfoProvider) isCacheItemExpired(added time.Time) bool {
-	return time.Now().Sub(added) > p.ttl
+func (p *MixedTemplateNodeInfoProvider) isCacheItemExpired(now time.Time, added time.Time) bool {
+	return now.Sub(added) > p.ttl
 }
 
 // CleanUp cleans up processor's internal structures.
@@ -72,7 +72,7 @@ func (p *MixedTemplateNodeInfoProvider) CleanUp() {
 }
 
 // Process returns the nodeInfos set for this cluster
-func (p *MixedTemplateNodeInfoProvider) Process(ctx *context.AutoscalingContext, nodes []*apiv1.Node, daemonsets []*appsv1.DaemonSet, taintConfig taints.TaintConfig, now time.Time) (map[string]*framework.NodeInfo, caerror.AutoscalerError) {
+func (p *MixedTemplateNodeInfoProvider) Process(autoscalingCtx *ca_context.AutoscalingContext, nodes []*apiv1.Node, daemonsets []*appsv1.DaemonSet, taintConfig taints.TaintConfig, now time.Time) (map[string]*framework.NodeInfo, caerror.AutoscalerError) {
 	// TODO(mwielgus): This returns map keyed by url, while most code (including scheduler) uses node.Name for a key.
 	// TODO(mwielgus): Review error policy - sometimes we may continue with partial errors.
 	result := make(map[string]*framework.NodeInfo)
@@ -92,16 +92,17 @@ func (p *MixedTemplateNodeInfoProvider) Process(ctx *context.AutoscalingContext,
 
 	// processNode returns information whether the nodeTemplate was generated and if there was an error.
 	processNode := func(node *apiv1.Node) (bool, string, caerror.AutoscalerError) {
-		nodeGroup, err := ctx.CloudProvider.NodeGroupForNode(node)
+		nodeGroup, err := autoscalingCtx.CloudProvider.NodeGroupForNode(node)
 		if err != nil {
-			return false, "", caerror.ToAutoscalerError(caerror.CloudProviderError, err)
+			klog.Warningf("Failed to find node group for %s: %v", node.Name, err)
+			return false, "", nil
 		}
 		if nodeGroup == nil || reflect.ValueOf(nodeGroup).IsNil() {
 			return false, "", nil
 		}
 		id := nodeGroup.Id()
 		if _, found := result[id]; !found {
-			nodeInfo, err := ctx.ClusterSnapshot.GetNodeInfo(node.Name)
+			nodeInfo, err := autoscalingCtx.ClusterSnapshot.GetNodeInfo(node.Name)
 			if err != nil {
 				return false, "", caerror.NewAutoscalerErrorf(caerror.InternalError, "error while retrieving node %s from cluster snapshot - this shouldn't happen: %v", node.Name, err)
 			}
@@ -122,10 +123,10 @@ func (p *MixedTemplateNodeInfoProvider) Process(ctx *context.AutoscalingContext,
 		}
 		if added && p.nodeInfoCache != nil {
 			nodeInfoCopy := result[id].DeepCopy()
-			p.nodeInfoCache[id] = cacheItem{NodeInfo: nodeInfoCopy, added: time.Now()}
+			p.nodeInfoCache[id] = cacheItem{NodeInfo: nodeInfoCopy, added: now}
 		}
 	}
-	for _, nodeGroup := range ctx.CloudProvider.NodeGroups() {
+	for _, nodeGroup := range autoscalingCtx.CloudProvider.NodeGroups() {
 		id := nodeGroup.Id()
 		seenGroups[id] = true
 		if _, found := result[id]; found {
@@ -135,7 +136,7 @@ func (p *MixedTemplateNodeInfoProvider) Process(ctx *context.AutoscalingContext,
 		// No good template, check cache of previously running nodes.
 		if p.nodeInfoCache != nil {
 			if cacheItem, found := p.nodeInfoCache[id]; found {
-				if p.isCacheItemExpired(cacheItem.added) {
+				if p.isCacheItemExpired(now, cacheItem.added) {
 					delete(p.nodeInfoCache, id)
 				} else {
 					result[id] = cacheItem.NodeInfo.DeepCopy()
@@ -169,12 +170,12 @@ func (p *MixedTemplateNodeInfoProvider) Process(ctx *context.AutoscalingContext,
 		if typedErr != nil {
 			return map[string]*framework.NodeInfo{}, typedErr
 		}
-		nodeGroup, err := ctx.CloudProvider.NodeGroupForNode(node)
-		if err != nil {
-			return map[string]*framework.NodeInfo{}, caerror.ToAutoscalerError(
-				caerror.CloudProviderError, err)
-		}
 		if added {
+			nodeGroup, err := autoscalingCtx.CloudProvider.NodeGroupForNode(node)
+			if nodeGroup == nil || err != nil {
+				klog.Warningf("Failed to find node group for %s: %v", node.Name, err)
+				continue
+			}
 			klog.Warningf("Built template for %s based on unready/unschedulable node %s", nodeGroup.Id(), node.Name)
 		}
 	}

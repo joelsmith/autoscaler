@@ -50,6 +50,8 @@ type NodeGroupAutoscalingOptions struct {
 	ScaleDownUnreadyTime time.Duration
 	// Maximum time CA waits for node to be provisioned
 	MaxNodeProvisionTime time.Duration
+	// Maximum time CA waits for node to be ready from registered
+	MaxNodeStartupTime time.Duration
 	// ZeroOrMaxNodeScaling means that a node group should be scaled up to maximum size or down to zero nodes all at once instead of one-by-one.
 	ZeroOrMaxNodeScaling bool
 	// AllowNonAtomicScaleUpToMax indicates that partially failing scale-ups of ZeroOrMaxNodeScaling node groups should not be cancelled
@@ -292,6 +294,8 @@ type AutoscalingOptions struct {
 	DynamicNodeDeleteDelayAfterTaintEnabled bool
 	// BypassedSchedulers are used to specify which schedulers to bypass their processing
 	BypassedSchedulers map[string]bool
+	// AllowedSchedulers when specified CA will proceed only with pods that are targeting allowed schedulers from unschedulable pods and unprocessed pods by BypassedSchedulers.
+	AllowedSchedulers map[string]bool
 	// ProvisioningRequestEnabled tells if CA processes ProvisioningRequest.
 	ProvisioningRequestEnabled bool
 	// AsyncNodeGroupsEnabled tells if CA creates/deletes node groups asynchronously.
@@ -314,8 +318,12 @@ type AutoscalingOptions struct {
 	ForceDeleteFailedNodes bool
 	// DynamicResourceAllocationEnabled configures whether logic for handling DRA objects is enabled.
 	DynamicResourceAllocationEnabled bool
+	// CSINodeAwareSchedulingEnabled configures whether logic for handling CSINode objects is enabled.
+	CSINodeAwareSchedulingEnabled bool
 	// ClusterSnapshotParallelism is the maximum parallelism of cluster snapshot creation.
 	ClusterSnapshotParallelism int
+	// PredicateParallelism is the number of goroutines to use for running scheduler predicates.
+	PredicateParallelism int
 	// CheckCapacityProcessorInstance is the name of the processor instance.
 	// Only ProvisioningRequests that define this name in their parameters with the key "processorInstance" will be processed by this CA instance.
 	// It only refers to check capacity ProvisioningRequests, but if not empty, best-effort atomic ProvisioningRequests processing is disabled in this instance.
@@ -352,6 +360,10 @@ type AutoscalingOptions struct {
 	CapacitybufferControllerEnabled bool
 	// CapacitybufferPodInjectionEnabled tells if CA should injects fake pods for capacity buffers that are ready for provisioning
 	CapacitybufferPodInjectionEnabled bool
+	// MaxNodeSkipEvalTimeTrackerEnabled is used to enabled/disable the tracking of maximum evaluation time of a node being skipped during ScaleDown.
+	MaxNodeSkipEvalTimeTrackerEnabled bool
+	// NodeRemovalLatencyTrackingEnabled is used to enable/disable node removal latency tracking.
+	NodeRemovalLatencyTrackingEnabled bool
 }
 
 // KubeClientOptions specify options for kube client

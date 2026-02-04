@@ -17,7 +17,7 @@ limitations under the License.
 package main
 
 import (
-	ctx "context"
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -48,6 +48,7 @@ import (
 	"k8s.io/apiserver/pkg/server/mux"
 	"k8s.io/apiserver/pkg/server/routes"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	cbv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacitybuffer/autoscaling.x-k8s.io/v1beta1"
 	capacitybuffer "k8s.io/autoscaler/cluster-autoscaler/capacitybuffer/controller"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/core"
@@ -73,6 +74,7 @@ import (
 	kube_util "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
 	"k8s.io/autoscaler/cluster-autoscaler/version"
 	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	kube_flag "k8s.io/component-base/cli/flag"
@@ -100,7 +102,7 @@ func registerSignalHandlers(autoscaler core.Autoscaler) {
 	}()
 }
 
-func buildAutoscaler(context ctx.Context, debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter) (core.Autoscaler, *loop.LoopTrigger, error) {
+func buildAutoscaler(ctx context.Context, debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter) (core.Autoscaler, *loop.LoopTrigger, error) {
 	// Get AutoscalingOptions from flags.
 	autoscalingOptions := flags.AutoscalingOptions()
 
@@ -115,7 +117,7 @@ func buildAutoscaler(context ctx.Context, debuggingSnapshotter debuggingsnapshot
 	}
 	informerFactory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 0, informers.WithTransform(trim))
 
-	fwHandle, err := framework.NewHandle(informerFactory, autoscalingOptions.SchedulerConfig, autoscalingOptions.DynamicResourceAllocationEnabled)
+	fwHandle, err := framework.NewHandle(informerFactory, autoscalingOptions.SchedulerConfig, autoscalingOptions.DynamicResourceAllocationEnabled, autoscalingOptions.CSINodeAwareSchedulingEnabled)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -126,7 +128,7 @@ func buildAutoscaler(context ctx.Context, debuggingSnapshotter debuggingsnapshot
 	opts := coreoptions.AutoscalerOptions{
 		AutoscalingOptions:   autoscalingOptions,
 		FrameworkHandle:      fwHandle,
-		ClusterSnapshot:      predicate.NewPredicateSnapshot(snapshotStore, fwHandle, autoscalingOptions.DynamicResourceAllocationEnabled),
+		ClusterSnapshot:      predicate.NewPredicateSnapshot(snapshotStore, fwHandle, autoscalingOptions.DynamicResourceAllocationEnabled, autoscalingOptions.PredicateParallelism, autoscalingOptions.CSINodeAwareSchedulingEnabled),
 		KubeClient:           kubeClient,
 		InformerFactory:      informerFactory,
 		DebuggingSnapshotter: debuggingSnapshotter,
@@ -188,14 +190,23 @@ func buildAutoscaler(context ctx.Context, debuggingSnapshotter debuggingsnapshot
 	}
 
 	if autoscalingOptions.CapacitybufferPodInjectionEnabled {
+		// Add CapacityBuffer types to the default scheme for event recording.
+		if err := cbv1beta1.AddToScheme(scheme.Scheme); err != nil {
+			klog.Warningf("Failed to add CapacityBuffer (v1beta1) to scheme: %v", err)
+		}
 		if capacitybufferClient == nil {
 			restConfig := kube_util.GetKubeConfig(autoscalingOptions.KubeClientOpts)
 			capacitybufferClient, capacitybufferClientError = capacityclient.NewCapacityBufferClientFromConfig(restConfig)
 		}
 		if capacitybufferClientError == nil && capacitybufferClient != nil {
-			bufferPodInjector := cbprocessor.NewCapacityBufferPodListProcessor(capacitybufferClient, []string{common.ActiveProvisioningStrategy})
+			buffersPodsRegistry := cbprocessor.NewDefaultCapacityBuffersFakePodsRegistry()
+			bufferPodInjector := cbprocessor.NewCapacityBufferPodListProcessor(
+				capacitybufferClient,
+				[]string{common.ActiveProvisioningStrategy},
+				buffersPodsRegistry, true)
 			podListProcessor = pods.NewCombinedPodListProcessor([]pods.PodListProcessor{bufferPodInjector, podListProcessor})
-			opts.Processors.ScaleUpStatusProcessor = status.NewCombinedScaleUpStatusProcessor([]status.ScaleUpStatusProcessor{cbprocessor.NewFakePodsScaleUpStatusProcessor(), opts.Processors.ScaleUpStatusProcessor})
+			opts.Processors.ScaleUpStatusProcessor = status.NewCombinedScaleUpStatusProcessor([]status.ScaleUpStatusProcessor{
+				cbprocessor.NewFakePodsScaleUpStatusProcessor(buffersPodsRegistry), opts.Processors.ScaleUpStatusProcessor})
 		}
 	}
 
@@ -282,7 +293,7 @@ func buildAutoscaler(context ctx.Context, debuggingSnapshotter debuggingsnapshot
 		}
 	}
 
-	podObserver := loop.StartPodObserver(context, kube_util.CreateKubeClient(autoscalingOptions.KubeClientOpts))
+	podObserver := loop.StartPodObserver(ctx, kube_util.CreateKubeClient(autoscalingOptions.KubeClientOpts))
 
 	// A ProvisioningRequestPodsInjector is used as provisioningRequestProcessingTimesGetter here to obtain the last time a
 	// ProvisioningRequest was processed. This is because the ProvisioningRequestPodsInjector in addition to injecting pods
@@ -296,10 +307,10 @@ func run(healthCheck *metrics.HealthCheck, debuggingSnapshotter debuggingsnapsho
 	autoscalingOpts := flags.AutoscalingOptions()
 
 	metrics.RegisterAll(autoscalingOpts.EmitPerNodeGroupMetrics)
-	context, cancel := ctx.WithCancel(ctx.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	autoscaler, trigger, err := buildAutoscaler(context, debuggingSnapshotter)
+	autoscaler, trigger, err := buildAutoscaler(ctx, debuggingSnapshotter)
 	if err != nil {
 		klog.Fatalf("Failed to create autoscaler: %v", err)
 	}
@@ -365,7 +376,13 @@ func main() {
 	}
 
 	logs.InitLogs()
-	if err := logsapi.ValidateAndApply(loggingConfig, featureGate); err != nil {
+
+	opts, err := flags.ComputeLoggingOptions(pflag.CommandLine)
+	if err != nil {
+		klog.Fatalf("Failed to configure logging: %v", err)
+	}
+
+	if err := logsapi.ValidateAndApplyWithOptions(loggingConfig, opts, featureGate); err != nil {
 		klog.Fatalf("Failed to validate and apply logging configuration: %v", err)
 	}
 
@@ -403,7 +420,7 @@ func main() {
 		kubeClient := kube_util.CreateKubeClient(autoscalingOpts.KubeClientOpts)
 
 		// Validate that the client is ok.
-		_, err = kubeClient.CoreV1().Nodes().List(ctx.TODO(), metav1.ListOptions{})
+		_, err = kubeClient.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			klog.Fatalf("Failed to get nodes from apiserver: %v", err)
 		}
@@ -423,14 +440,14 @@ func main() {
 			klog.Fatalf("Unable to create leader election lock: %v", err)
 		}
 
-		leaderelection.RunOrDie(ctx.TODO(), leaderelection.LeaderElectionConfig{
+		leaderelection.RunOrDie(context.TODO(), leaderelection.LeaderElectionConfig{
 			Lock:            lock,
 			LeaseDuration:   leaderElection.LeaseDuration.Duration,
 			RenewDeadline:   leaderElection.RenewDeadline.Duration,
 			RetryPeriod:     leaderElection.RetryPeriod.Duration,
 			ReleaseOnCancel: true,
 			Callbacks: leaderelection.LeaderCallbacks{
-				OnStartedLeading: func(_ ctx.Context) {
+				OnStartedLeading: func(_ context.Context) {
 					// Since we are committing a suicide after losing
 					// mastership, we can safely ignore the argument.
 					run(healthCheck, debuggingSnapshotter)

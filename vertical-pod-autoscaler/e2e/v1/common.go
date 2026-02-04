@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
@@ -463,13 +462,4 @@ func WaitForPodsUpdatedWithoutEviction(f *framework.Framework, initialPods *apiv
 	})
 	framework.Logf("finished waiting for at least one pod to be updated without eviction")
 	return err
-}
-
-func anyContainsSubstring(arr []string, substr string) bool {
-	for _, s := range arr {
-		if strings.Contains(s, substr) {
-			return true
-		}
-	}
-	return false
 }
