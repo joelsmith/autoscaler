@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -34,6 +36,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	gpuapis "k8s.io/autoscaler/cluster-autoscaler/utils/gpu"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -1492,12 +1495,14 @@ func TestNodeGroupTemplateNodeInfo(t *testing.T) {
 
 	type testCaseConfig struct {
 		nodeLabels            map[string]string
+		managedLabels         map[string]string
 		nodegroupLabels       map[string]string
 		includeNodes          bool
 		expectedErr           error
 		expectedCapacity      map[corev1.ResourceName]int64
 		expectedNodeLabels    map[string]string
 		expectedResourceSlice testResourceSlice
+		expectedCSINode       *storagev1.CSINode
 	}
 
 	testCases := []struct {
@@ -1762,13 +1767,91 @@ func TestNodeGroupTemplateNodeInfo(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "When the NodeGroup can scale from zero, and the scalable resource contains managed labels",
+			nodeGroupAnnotations: map[string]string{
+				memoryKey:   "2048Mi",
+				cpuKey:      "2",
+				gpuTypeKey:  gpuapis.ResourceNvidiaGPU,
+				gpuCountKey: "1",
+			},
+			config: testCaseConfig{
+				expectedErr: nil,
+				nodeLabels: map[string]string{
+					"kubernetes.io/os":   "linux",
+					"kubernetes.io/arch": "amd64",
+				},
+				managedLabels: map[string]string{
+					"node-role.kubernetes.io/test": "test",
+				},
+				expectedCapacity: map[corev1.ResourceName]int64{
+					corev1.ResourceCPU:        2,
+					corev1.ResourceMemory:     2048 * 1024 * 1024,
+					corev1.ResourcePods:       110,
+					gpuapis.ResourceNvidiaGPU: 1,
+				},
+				expectedNodeLabels: map[string]string{
+					"kubernetes.io/os":             "linux",
+					"kubernetes.io/arch":           "amd64",
+					"kubernetes.io/hostname":       "random value",
+					"node-role.kubernetes.io/test": "test",
+				},
+			},
+		},
+		{
+			name: "When the NodeGroup can scale from zero and CSI driver annotations are present, it creates CSINode with driver information",
+			nodeGroupAnnotations: map[string]string{
+				memoryKey:    "2048Mi",
+				cpuKey:       "2",
+				csiDriverKey: "ebs.csi.aws.com=25,efs.csi.aws.com=16",
+			},
+			config: testCaseConfig{
+				expectedErr: nil,
+				nodeLabels: map[string]string{
+					"kubernetes.io/os":   "linux",
+					"kubernetes.io/arch": "amd64",
+				},
+				expectedCapacity: map[corev1.ResourceName]int64{
+					corev1.ResourceCPU:    2,
+					corev1.ResourceMemory: 2048 * 1024 * 1024,
+					corev1.ResourcePods:   110,
+				},
+				expectedNodeLabels: map[string]string{
+					"kubernetes.io/os":       "linux",
+					"kubernetes.io/arch":     "amd64",
+					"kubernetes.io/hostname": "random value",
+				},
+				expectedCSINode: &storagev1.CSINode{
+					Spec: storagev1.CSINodeSpec{
+						Drivers: []storagev1.CSINodeDriver{
+							{
+								Name: "ebs.csi.aws.com",
+								Allocatable: &storagev1.VolumeNodeResources{
+									Count: ptr.To(int32(25)),
+								},
+							},
+							{
+								Name: "efs.csi.aws.com",
+								Allocatable: &storagev1.VolumeNodeResources{
+									Count: ptr.To(int32(16)),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	test := func(t *testing.T, testConfig *TestConfig, config testCaseConfig) {
 		if testConfig.machineDeployment != nil {
-			unstructured.SetNestedStringMap(testConfig.machineDeployment.Object, config.nodegroupLabels, "spec", "template", "spec", "metadata", "labels")
+			labels, _, _ := unstructured.NestedStringMap(testConfig.machineDeployment.Object, "spec", "template", "spec", "metadata", "labels")
+			labels = cloudprovider.JoinStringMaps(config.nodegroupLabels, labels)
+			unstructured.SetNestedStringMap(testConfig.machineDeployment.Object, labels, "spec", "template", "spec", "metadata", "labels")
 		} else {
-			unstructured.SetNestedStringMap(testConfig.machineSet.Object, config.nodegroupLabels, "spec", "template", "spec", "metadata", "labels")
+			labels, _, _ := unstructured.NestedStringMap(testConfig.machineSet.Object, "spec", "template", "spec", "metadata", "labels")
+			labels = cloudprovider.JoinStringMaps(config.nodegroupLabels, labels)
+			unstructured.SetNestedStringMap(testConfig.machineSet.Object, labels, "spec", "template", "spec", "metadata", "labels")
 		}
 
 		if config.includeNodes {
@@ -1847,6 +1930,27 @@ func TestNodeGroupTemplateNodeInfo(t *testing.T) {
 				}
 			}
 		}
+
+		if config.expectedCSINode == nil && nodeInfo.CSINode != nil {
+			t.Fatalf("Expected CSINode to be nil, but got non-nil with %d drivers", len(nodeInfo.CSINode.Spec.Drivers))
+			return
+		}
+
+		if config.expectedCSINode != nil {
+			if nodeInfo.CSINode == nil {
+				t.Fatalf("Expected CSINode to be %+v, but got nil", config.expectedCSINode)
+				return
+			}
+
+			// Validate CSINode if expected
+			expectedDrivers := config.expectedCSINode.Spec.Drivers
+			gotDrivers := nodeInfo.CSINode.Spec.Drivers
+			if len(expectedDrivers) != len(gotDrivers) {
+				t.Errorf("Expected %d CSI drivers, but got %d", len(expectedDrivers), len(gotDrivers))
+			} else {
+				validateCSIDrivers(t, expectedDrivers, gotDrivers)
+			}
+		}
 	}
 
 	for _, tc := range testCases {
@@ -1857,6 +1961,7 @@ func TestNodeGroupTemplateNodeInfo(t *testing.T) {
 					WithNamespace(testNamespace).
 					WithNodeCount(10).
 					WithAnnotations(cloudprovider.JoinStringMaps(enableScaleAnnotations, tc.nodeGroupAnnotations)).
+					WithManagedLabels(tc.config.managedLabels).
 					Build()
 				test(t, testConfig, tc.config)
 			})
@@ -1867,12 +1972,12 @@ func TestNodeGroupTemplateNodeInfo(t *testing.T) {
 					WithNamespace(testNamespace).
 					WithNodeCount(10).
 					WithAnnotations(cloudprovider.JoinStringMaps(enableScaleAnnotations, tc.nodeGroupAnnotations)).
+					WithManagedLabels(tc.config.managedLabels).
 					Build()
 				test(t, testConfig, tc.config)
 			})
 		})
 	}
-
 }
 
 func TestNodeGroupGetOptions(t *testing.T) {
@@ -1887,6 +1992,7 @@ func TestNodeGroupGetOptions(t *testing.T) {
 		ScaleDownUnneededTime:            time.Second,
 		ScaleDownUnreadyTime:             time.Minute,
 		MaxNodeProvisionTime:             15 * time.Minute,
+		MaxNodeStartupTime:               35 * time.Minute,
 	}
 
 	cases := []struct {
@@ -1907,6 +2013,7 @@ func TestNodeGroupGetOptions(t *testing.T) {
 				config.DefaultScaleDownUnneededTimeKey:            "1h",
 				config.DefaultScaleDownUnreadyTimeKey:             "30m",
 				config.DefaultMaxNodeProvisionTimeKey:             "60m",
+				config.DefaultMaxNodeStartupTimeKey:               "35m",
 			},
 			expected: &config.NodeGroupAutoscalingOptions{
 				ScaleDownGpuUtilizationThreshold: 0.6,
@@ -1914,6 +2021,7 @@ func TestNodeGroupGetOptions(t *testing.T) {
 				ScaleDownUnneededTime:            time.Hour,
 				ScaleDownUnreadyTime:             30 * time.Minute,
 				MaxNodeProvisionTime:             60 * time.Minute,
+				MaxNodeStartupTime:               35 * time.Minute,
 			},
 		},
 		{
@@ -1928,6 +2036,7 @@ func TestNodeGroupGetOptions(t *testing.T) {
 				ScaleDownUnneededTime:            time.Minute,
 				ScaleDownUnreadyTime:             defaultOptions.ScaleDownUnreadyTime,
 				MaxNodeProvisionTime:             15 * time.Minute,
+				MaxNodeStartupTime:               35 * time.Minute,
 			},
 		},
 		{
@@ -2197,4 +2306,28 @@ func TestNodeGroupNodesInstancesStatus(t *testing.T) {
 			})
 		}
 	})
+}
+
+func validateCSIDrivers(t *testing.T, expectedDrivers []storagev1.CSINodeDriver, gotDrivers []storagev1.CSINodeDriver) {
+	t.Helper()
+	for _, gotDriver := range gotDrivers {
+		foundDriver := false
+		realDriverAllocatable := gotDriver.Allocatable
+		for _, expectedDriver := range expectedDrivers {
+			expectedDriverAllocatable := expectedDriver.Allocatable
+			if expectedDriver.Name == gotDriver.Name {
+				if expectedDriverAllocatable == nil && realDriverAllocatable == nil {
+					foundDriver = true
+					break
+				}
+				if reflect.DeepEqual(expectedDriverAllocatable, realDriverAllocatable) {
+					foundDriver = true
+					break
+				}
+			}
+		}
+		if !foundDriver {
+			t.Fatalf("Expected CSI driver %s not found in got drivers", gotDriver.Name)
+		}
+	}
 }

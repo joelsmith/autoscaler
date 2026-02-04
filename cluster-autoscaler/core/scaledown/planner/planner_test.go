@@ -30,7 +30,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	testprovider "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/test"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
-	"k8s.io/autoscaler/cluster-autoscaler/context"
+	ca_context "k8s.io/autoscaler/cluster-autoscaler/context"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/deletiontracker"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/pdb"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/status"
@@ -493,20 +493,22 @@ func TestUpdateClusterState(t *testing.T) {
 			for _, node := range tc.nodes {
 				provider.AddNode("ng1", node)
 			}
-			context, err := NewScaleTestAutoscalingContext(config.AutoscalingOptions{
+			opts := config.AutoscalingOptions{
 				NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
 					ScaleDownUnneededTime: 10 * time.Minute,
 				},
 				ScaleDownSimulationTimeout: 1 * time.Second,
 				MaxScaleDownParallelism:    10,
-			}, &fake.Clientset{}, registry, provider, nil, nil)
+			}
+			processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(opts)
+			autoscalingCtx, err := NewScaleTestAutoscalingContext(opts, &fake.Clientset{}, registry, provider, nil, nil, templateNodeInfoRegistry)
 			assert.NoError(t, err)
-			clustersnapshot.InitializeClusterSnapshotOrDie(t, context.ClusterSnapshot, tc.nodes, tc.pods)
+			clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, tc.nodes, tc.pods)
 			deleteOptions := options.NodeDeleteOptions{}
-			p := New(&context, processorstest.NewTestProcessors(&context), deleteOptions, nil)
+			p := New(&autoscalingCtx, processors, deleteOptions, nil)
 			p.eligibilityChecker = &fakeEligibilityChecker{eligible: asMap(tc.eligible)}
 			if tc.isSimulationTimeout {
-				context.AutoscalingOptions.ScaleDownSimulationTimeout = 1 * time.Second
+				autoscalingCtx.AutoscalingOptions.ScaleDownSimulationTimeout = 1 * time.Second
 				rs := &fakeRemovalSimulator{
 					nodes: tc.nodes,
 					sleep: 2 * time.Second,
@@ -689,20 +691,22 @@ func TestUpdateClusterStatUnneededNodesLimit(t *testing.T) {
 			for _, node := range nodes {
 				provider.AddNode("ng1", node)
 			}
-			context, err := NewScaleTestAutoscalingContext(config.AutoscalingOptions{
+			autoscalingOpts := config.AutoscalingOptions{
 				NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
 					ScaleDownUnneededTime: tc.maxUnneededTime,
 				},
 				ScaleDownSimulationTimeout: 1 * time.Hour,
 				MaxScaleDownParallelism:    tc.maxParallelism,
-			}, &fake.Clientset{}, nil, provider, nil, nil)
+			}
+			processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(autoscalingOpts)
+			autoscalingCtx, err := NewScaleTestAutoscalingContext(autoscalingOpts, &fake.Clientset{}, nil, provider, nil, nil, templateNodeInfoRegistry)
 			assert.NoError(t, err)
-			clustersnapshot.InitializeClusterSnapshotOrDie(t, context.ClusterSnapshot, nodes, nil)
+			clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, nodes, nil)
 			deleteOptions := options.NodeDeleteOptions{}
-			p := New(&context, processorstest.NewTestProcessors(&context), deleteOptions, nil)
+			p := New(&autoscalingCtx, processors, deleteOptions, nil)
 			p.eligibilityChecker = &fakeEligibilityChecker{eligible: asMap(nodeNames(nodes))}
 			p.minUpdateInterval = tc.updateInterval
-			p.unneededNodes.Update(previouslyUnneeded, time.Now())
+			p.unneededNodes.Update(&autoscalingCtx, previouslyUnneeded, time.Now())
 			assert.NoError(t, p.UpdateClusterState(nodes, nodes, &fakeActuationStatus{}, time.Now()))
 			assert.Equal(t, tc.wantUnneeded, len(p.unneededNodes.AsList()))
 		})
@@ -817,7 +821,8 @@ func TestNewPlannerWithExistingDeletionCandidateNodes(t *testing.T) {
 				provider.AddNode("ng1", node)
 			}
 
-			context, err := NewScaleTestAutoscalingContext(
+			processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(autoscalingOptions)
+			autoscalingCtx, err := NewScaleTestAutoscalingContext(
 				autoscalingOptions,
 				&fake.Clientset{},
 				kube_util.NewListerRegistry(
@@ -829,11 +834,12 @@ func TestNewPlannerWithExistingDeletionCandidateNodes(t *testing.T) {
 				provider,
 				nil,
 				nil,
+				templateNodeInfoRegistry,
 			)
 			assert.NoError(t, err)
 
 			deleteOptions := options.NodeDeleteOptions{}
-			p := New(&context, processorstest.NewTestProcessors(&context), deleteOptions, nil)
+			p := New(&autoscalingCtx, processors, deleteOptions, nil)
 
 			p.unneededNodes.AsList()
 		})
@@ -1014,19 +1020,21 @@ func TestNodesToDelete(t *testing.T) {
 					provider.AddNode(ng, node)
 				}
 			}
-			context, err := NewScaleTestAutoscalingContext(config.AutoscalingOptions{
+			autoscalingOpts := config.AutoscalingOptions{
 				NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
 					ScaleDownUnneededTime: 10 * time.Minute,
 					ScaleDownUnreadyTime:  0 * time.Minute,
 				},
-			}, &fake.Clientset{}, nil, provider, nil, nil)
+			}
+			processors, templateNodeInfoRegistry := processorstest.NewTestProcessors(autoscalingOpts)
+			autoscalingCtx, err := NewScaleTestAutoscalingContext(autoscalingOpts, &fake.Clientset{}, nil, provider, nil, nil, templateNodeInfoRegistry)
 			assert.NoError(t, err)
-			clustersnapshot.InitializeClusterSnapshotOrDie(t, context.ClusterSnapshot, allNodes, nil)
+			clustersnapshot.InitializeClusterSnapshotOrDie(t, autoscalingCtx.ClusterSnapshot, allNodes, nil)
 			deleteOptions := options.NodeDeleteOptions{}
-			p := New(&context, processorstest.NewTestProcessors(&context), deleteOptions, nil)
+			p := New(&autoscalingCtx, processors, deleteOptions, nil)
 			p.latestUpdate = time.Now()
 			p.scaleDownContext.ActuationStatus = deletiontracker.NewNodeDeletionTracker(0 * time.Second)
-			p.unneededNodes.Update(allRemovables, time.Now().Add(-1*time.Hour))
+			p.unneededNodes.Update(&autoscalingCtx, allRemovables, time.Now().Add(-1*time.Hour))
 			p.eligibilityChecker = &fakeEligibilityChecker{eligible: asMap(nodeNames(allNodes))}
 			empty, drain := p.NodesToDelete(time.Now())
 			assert.ElementsMatch(t, tc.wantEmpty, empty)
@@ -1123,7 +1131,7 @@ type fakeEligibilityChecker struct {
 	eligible map[string]bool
 }
 
-func (f *fakeEligibilityChecker) FilterOutUnremovable(context *context.AutoscalingContext, scaleDownCandidates []*apiv1.Node, timestamp time.Time, unremovableNodes *unremovable.Nodes) ([]string, map[string]utilization.Info, []*simulator.UnremovableNode) {
+func (f *fakeEligibilityChecker) FilterOutUnremovable(autoscalingCtx *ca_context.AutoscalingContext, scaleDownCandidates []*apiv1.Node, timestamp time.Time, unremovableNodes *unremovable.Nodes) ([]string, map[string]utilization.Info, []*simulator.UnremovableNode) {
 	eligible := []string{}
 	utilMap := make(map[string]utilization.Info)
 	for _, n := range scaleDownCandidates {

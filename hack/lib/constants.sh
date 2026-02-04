@@ -160,6 +160,7 @@ function os::util::list_test_packages_under() {
               -o -path 'cluster-autoscaler/cloudprovider/scaleway' \
               -o -path 'cluster-autoscaler/cloudprovider/tencentcloud' \
               -o -path 'cluster-autoscaler/cloudprovider/vultr' \
+              -o -path 'cluster-autoscaler/e2e' \
         \) -prune                             \
     \) -name '*_test.go' | xargs -n1 dirname | sort -u | xargs -n1 printf "${OS_GO_PACKAGE}/%s\n"
 }
