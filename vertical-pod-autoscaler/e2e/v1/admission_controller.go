@@ -923,6 +923,9 @@ var _ = AdmissionControllerE2eDescribe("Admission-controller", func() {
 	})
 
 	f.It("accepts valid and rejects invalid VPA object with features.PerVPAConfig enabled", framework.WithFeatureGate(features.PerVPAConfig), func() {
+		// TODO(joelsmith): We need to carry patch this to skip this on OpenShift
+		ginkgo.Skip("Skipping test on OpenShift because we have this feature gate disabled")
+
 		ginkgo.By("Setting up invalid VPA objects")
 		testCases := []struct {
 			name        string
